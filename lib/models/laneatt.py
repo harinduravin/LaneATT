@@ -23,7 +23,8 @@ class LaneATT(nn.Module):
                  img_h=360,
                  anchors_freq_path=None,
                  topk_anchors=None,
-                 anchor_feat_channels=64):
+                 anchor_feat_channels=64,
+                 classes_num=7): # change 1
         super(LaneATT, self).__init__()
         # Some definitions
         self.feature_extractor, backbone_nb_channels, self.stride = get_backbone(backbone, pretrained_backbone)
@@ -33,9 +34,10 @@ class LaneATT(nn.Module):
         self.fmap_h = img_h // self.stride
         fmap_w = img_w // self.stride
         self.fmap_w = fmap_w
-        self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)
-        self.anchor_cut_ys = torch.linspace(1, 0, steps=self.fmap_h, dtype=torch.float32)
+        self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32) #
+        self.anchor_cut_ys = torch.linspace(1, 0, steps=self.fmap_h, dtype=torch.float32) # spanning height of feature map
         self.anchor_feat_channels = anchor_feat_channels
+        self.classes_num = classes_num # Change 2
 
         # Anchor angles, same ones used in Line-CNN
         self.left_angles = [72., 60., 49., 39., 30., 22.]
@@ -59,7 +61,7 @@ class LaneATT(nn.Module):
 
         # Setup and initialize layers
         self.conv1 = nn.Conv2d(backbone_nb_channels, self.anchor_feat_channels, kernel_size=1)
-        self.cls_layer = nn.Linear(2 * self.anchor_feat_channels * self.fmap_h, 2)
+        self.cls_layer = nn.Linear(2 * self.anchor_feat_channels * self.fmap_h, classes_num) # Change 3
         self.reg_layer = nn.Linear(2 * self.anchor_feat_channels * self.fmap_h, self.n_offsets + 1)
         self.attention_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, len(self.anchors) - 1)
         self.initialize_layer(self.attention_layer)
@@ -72,7 +74,7 @@ class LaneATT(nn.Module):
         batch_features = self.conv1(batch_features)
         batch_anchor_features = self.cut_anchor_features(batch_features)
 
-        # Join proposals from all images into a single proposals features batch
+        # Join proposals from all images into a single proposals features batch (batch, n_proposals, n_fmaps, self.fmap_h, 1) -->
         batch_anchor_features = batch_anchor_features.view(-1, self.anchor_feat_channels * self.fmap_h)
 
         # Add attention features
@@ -99,10 +101,10 @@ class LaneATT(nn.Module):
         reg = reg.reshape(x.shape[0], -1, reg.shape[1])
 
         # Add offsets to anchors
-        reg_proposals = torch.zeros((*cls_logits.shape[:2], 5 + self.n_offsets), device=x.device)
+        reg_proposals = torch.zeros((*cls_logits.shape[:2], self.classes_num + 3 + self.n_offsets), device=x.device) # Change 7 self.classes_num + 3
         reg_proposals += self.anchors
-        reg_proposals[:, :, :2] = cls_logits
-        reg_proposals[:, :, 4:] += reg
+        reg_proposals[:, :, :self.classes_num] = cls_logits # Change 5 numclasses 
+        reg_proposals[:, :, self.classes_num+2:] += reg # Change 6 numclasses + 2
 
         # Apply nms
         proposals_list = self.nms(reg_proposals, attention_matrix, nms_thres, nms_topk, conf_threshold)
@@ -116,7 +118,7 @@ class LaneATT(nn.Module):
             anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
             # The gradients do not have to (and can't) be calculated for the NMS procedure
             with torch.no_grad():
-                scores = softmax(proposals[:, :2])[:, 1]
+                scores = 1 - softmax(proposals[:, :self.classes_num])[:, 0] # Change 8 Take 1 - [:, 0]
                 if conf_threshold is not None:
                     # apply confidence threshold
                     above_threshold = scores > conf_threshold
@@ -246,6 +248,7 @@ class LaneATT(nn.Module):
         return torch.cat([left_anchors, bottom_anchors, right_anchors]), torch.cat([left_cut, bottom_cut, right_cut])
 
     def generate_side_anchors(self, angles, nb_origins, x=None, y=None):
+        # x = 0 and y = None Left edge, x = 1 and y = None Right edge, x = None and y = 1 Bottom edge
         if x is None and y is not None:
             starts = [(x, y) for x in np.linspace(1., 0., num=nb_origins)]
         elif x is not None and y is None:
@@ -256,9 +259,9 @@ class LaneATT(nn.Module):
         n_anchors = nb_origins * len(angles)
 
         # each row, first for x and second for y:
-        # 2 scores, 1 start_y, start_x, 1 lenght, S coordinates, score[0] = negative prob, score[1] = positive prob
-        anchors = torch.zeros((n_anchors, 2 + 2 + 1 + self.n_offsets))
-        anchors_cut = torch.zeros((n_anchors, 2 + 2 + 1 + self.fmap_h))
+        # self.classes_num scores, 1 start_y, start_x, 1 lenght, S coordinates, score[0] = negative prob, score[1] = positive prob
+        anchors = torch.zeros((n_anchors, self.classes_num + 2 + 1 + self.n_offsets)) # Change 4
+        anchors_cut = torch.zeros((n_anchors, self.classes_num + 2 + 1 + self.fmap_h)) # Change 9
         for i, start in enumerate(starts):
             for j, angle in enumerate(angles):
                 k = i * len(angles) + j
@@ -269,16 +272,16 @@ class LaneATT(nn.Module):
 
     def generate_anchor(self, start, angle, cut=False):
         if cut:
-            anchor_ys = self.anchor_cut_ys
-            anchor = torch.zeros(2 + 2 + 1 + self.fmap_h)
+            anchor_ys = self.anchor_cut_ys # f_maph long
+            anchor = torch.zeros(self.classes_num + 2 + 1 + self.fmap_h) # Change 10
         else:
-            anchor_ys = self.anchor_ys
-            anchor = torch.zeros(2 + 2 + 1 + self.n_offsets)
+            anchor_ys = self.anchor_ys # values between 0 and 1 ,no of offsets long
+            anchor = torch.zeros(self.classes_num + 2 + 1 + self.n_offsets) # Change 11
         angle = angle * math.pi / 180.  # degrees to radians
         start_x, start_y = start
-        anchor[2] = 1 - start_y
-        anchor[3] = start_x
-        anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle)) * self.img_w
+        anchor[self.classes_num] = 1 - start_y
+        anchor[self.classes_num+1] = start_x
+        anchor[3+self.classes_num:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle)) * self.img_w
 
         return anchor
 
@@ -291,7 +294,7 @@ class LaneATT(nn.Module):
             if k is not None and i != k:
                 continue
             anchor = anchor.numpy()
-            xs = anchor[5:]
+            xs = anchor[self.classes_num+3:]
             ys = base_ys * img_h
             points = np.vstack((xs, ys)).T.round().astype(int)
             for p_curr, p_next in zip(points[:-1], points[1:]):

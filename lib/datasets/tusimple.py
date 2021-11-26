@@ -84,7 +84,8 @@ class TuSimple(LaneDatasetLoader):
                     'org_lanes': gt_lanes,
                     'lanes': lanes,
                     'aug': False,
-                    'y_samples': y_samples
+                    'y_samples': y_samples,
+                    'lane_class':data['classes']
                 })
 
         if self.split == 'train':

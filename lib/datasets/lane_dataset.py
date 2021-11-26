@@ -31,6 +31,7 @@ class LaneDataset(Dataset):
                  normalize=False,
                  img_size=(360, 640),
                  aug_chance=1.,
+                 classes_num=7,
                  **kwargs):
         super(LaneDataset, self).__init__()
         if dataset == 'tusimple':
@@ -43,6 +44,8 @@ class LaneDataset(Dataset):
             self.dataset = NoLabelDataset(**kwargs)
         else:
             raise NotImplementedError()
+
+        self.classes_num = classes_num
         self.n_strips = S - 1
         self.n_offsets = S
         self.normalize = normalize
@@ -94,9 +97,11 @@ class LaneDataset(Dataset):
             img_w, img_h = img_wh
 
         old_lanes = anno['lanes']
+        classes = anno['classes']
 
         # removing lanes with less than 2 points
-        old_lanes = filter(lambda x: len(x) > 1, old_lanes)
+        old_lanes = filter(lambda x: len(x) > 1, old_lanes)  # change
+
         # sort lane points by Y (bottom to top of the image)
         old_lanes = [sorted(lane, key=lambda x: -x[1]) for lane in old_lanes]
         # remove points with same Y (keep first occurrence)
@@ -105,11 +110,11 @@ class LaneDataset(Dataset):
         old_lanes = [[[x * self.img_w / float(img_w), y * self.img_h / float(img_h)] for x, y in lane]
                      for lane in old_lanes]
         # create tranformed annotations
-        lanes = np.ones((self.dataset.max_lanes, 2 + 1 + 1 + 1 + self.n_offsets),
-                        dtype=np.float32) * -1e5  # 2 scores, 1 start_y, 1 start_x, 1 length, S+1 coordinates
+        lanes = np.ones((self.dataset.max_lanes, self.classes_num + 1 + 1 + 1 + self.n_offsets),
+                        dtype=np.float32) * -1e5  # self.classes_num scores, 1 start_y, 1 start_x, 1 length, S+1 coordinates
         # lanes are invalid by default
         lanes[:, 0] = 1
-        lanes[:, 1] = 0
+        lanes[:, 1:self.classes_num] = 0
         for lane_idx, lane in enumerate(old_lanes):
             try:
                 xs_outside_image, xs_inside_image = self.sample_lane(lane, self.offsets_ys)
@@ -119,11 +124,13 @@ class LaneDataset(Dataset):
                 continue
             all_xs = np.hstack((xs_outside_image, xs_inside_image))
             lanes[lane_idx, 0] = 0
-            lanes[lane_idx, 1] = 1
-            lanes[lane_idx, 2] = len(xs_outside_image) / self.n_strips
-            lanes[lane_idx, 3] = xs_inside_image[0]
-            lanes[lane_idx, 4] = len(xs_inside_image)
-            lanes[lane_idx, 5:5 + len(all_xs)] = all_xs
+
+            lanes[lane_idx, 1] = 1 # Value from dataset
+
+            lanes[lane_idx, self.classes_num] = len(xs_outside_image) / self.n_strips
+            lanes[lane_idx, self.classes_num+1] = xs_inside_image[0]
+            lanes[lane_idx, self.classes_num+2] = len(xs_inside_image)
+            lanes[lane_idx, self.classes_num+3: self.classes_num+ 3 + len(all_xs)] = all_xs
 
         new_anno = {'path': anno['path'], 'label': lanes, 'old_anno': anno}
         return new_anno
@@ -163,7 +170,7 @@ class LaneDataset(Dataset):
         for l in label:
             if l[1] == 0:
                 continue
-            xs = l[5:] / self.img_w
+            xs = l[self.classes_num+3:] / self.img_w # Change 1
             ys = self.offsets_ys / self.img_h
             start = int(round(l[2] * self.n_strips))
             length = int(round(l[4]))
